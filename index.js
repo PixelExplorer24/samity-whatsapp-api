@@ -7,7 +7,7 @@ app.use(express.json());
 
 let waClient = null;
 
-// হোয়াটসঅ্যাপ ক্লায়েন্ট শুরু করার রুট
+// হোয়াটসঅ্যাপ ক্লায়েন্ট শুরু করার রুট
 wppconnect.create({
     session: 'samity-session',
     catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -20,7 +20,20 @@ wppconnect.create({
     devtools: false,
     useChrome: true,
     debug: false,
-    logQR: true
+    logQR: true,
+    // Render বা Linux সার্ভারে রান করার জন্য এই অংশটুকু অত্যন্ত জরুরি
+    puppeteerOptions: {
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process', 
+            '--disable-gpu'
+        ]
+    }
 })
 .then((client) => {
     waClient = client;
