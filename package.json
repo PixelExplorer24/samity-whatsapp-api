@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.35.0",
+    "@wppconnect-team/wppconnect": "^2.2.3",
     "adm-zip": "^0.5.16",
     "cors": "^2.8.5",
     "express": "^4.19.2",
