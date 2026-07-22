@@ -77,6 +77,16 @@ async function startSystem() {
     wppconnect.create({
         session: SESSION_NAME,
         autoClose: 0,
+        qrTimeout: 0,
+        browserArgs: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ],
         catchQR: (base64Qr, asciiQR) => {
             console.log('QR কোড তৈরি হয়েছে! দয়া করে স্ক্যান করুন।');
             qrCodeData = base64Qr;
@@ -105,7 +115,6 @@ async function startSystem() {
     });
 }
 
-// ব্রাউজারে কিউআর কোড এবং স্ট্যাটাস দেখানোর জন্য
 app.get('/', (req, res) => {
     if (whatsappClient) {
         res.send(`
