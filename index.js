@@ -7,11 +7,9 @@ const AdmZip = require('adm-zip');
 const { MongoClient } = require('mongodb');
 
 const app = express();
-// CORS চালু করা হলো
 app.use(cors());
 app.use(express.json());
 
-// ⚠️ নিচের লিংকে <db_username> এবং <db_password> এর জায়গায় আপনার আসল ইউজারনেম ও পাসওয়ার্ড বসিয়ে দিন
 const MONGO_URI = 'mongodb+srv://samityAdmin:samity123@cluster0.rnh0xw2.mongodb.net/?appName=Cluster0'; 
 const DB_NAME = 'whatsapp_api';
 const COLLECTION_NAME = 'sessions';
@@ -21,7 +19,6 @@ const TOKEN_DIR = path.join(__dirname, 'tokens', SESSION_NAME);
 let whatsappClient = null;
 let qrCodeData = null;
 
-// MongoDB থেকে সেশন রিস্টোর করার ফাংশন
 async function restoreSessionFromMongo() {
     console.log('⏳ MongoDB থেকে সেশন খোঁজা হচ্ছে...');
     const client = new MongoClient(MONGO_URI);
@@ -37,7 +34,7 @@ async function restoreSessionFromMongo() {
             const zip = new AdmZip(zipPath);
             zip.extractAllTo(TOKEN_DIR, true);
             console.log('✅ MongoDB থেকে সেশন সফলভাবে রিস্টোর করা হয়েছে!');
-            fs.unlinkSync(zipPath); // টেম্পোরারি জিপ ফাইল মুছে ফেলা
+            fs.unlinkSync(zipPath);
         } else {
             console.log('⚠️ ডাটাবেসে আগের কোনো সেশন পাওয়া যায়নি। নতুন করে QR কোড স্ক্যান করতে হবে।');
         }
@@ -48,7 +45,6 @@ async function restoreSessionFromMongo() {
     }
 }
 
-// MongoDB তে সেশন ব্যাকআপ রাখার ফাংশন
 async function backupSessionToMongo() {
     if (!fs.existsSync(TOKEN_DIR)) return;
     console.log('⏳ MongoDB তে সেশন ব্যাকআপ নেওয়া হচ্ছে...');
@@ -64,7 +60,7 @@ async function backupSessionToMongo() {
         await db.collection(COLLECTION_NAME).updateOne(
             { sessionName: SESSION_NAME },
             { $set: { zipBuffer: zipBuffer, updatedAt: new Date() } },
-            { upsert: true } // না থাকলে তৈরি করবে, থাকলে আপডেট করবে
+            { upsert: true }
         );
         console.log('✅ সেশন সফলভাবে MongoDB তে সুরক্ষিত করা হয়েছে!');
     } catch (error) {
@@ -74,14 +70,12 @@ async function backupSessionToMongo() {
     }
 }
 
-// মূল সিস্টেম চালু করা
 async function startSystem() {
-    // ১. প্রথমে ডাটাবেস থেকে সেশন নিয়ে আসার চেষ্টা করবে
     await restoreSessionFromMongo();
 
-    // ২. এরপর হোয়াটসঅ্যাপ ক্লায়েন্ট তৈরি করবে
     wppconnect.create({
         session: SESSION_NAME,
+        autoClose: 0,
         catchQR: (base64Qr, asciiQR) => {
             console.log('QR কোড তৈরি হয়েছে! দয়া করে স্ক্যান করুন।');
             qrCodeData = base64Qr;
@@ -90,7 +84,6 @@ async function startSystem() {
             console.log('সেশন স্ট্যাটাস:', statusSession);
             if (statusSession === 'isLogged' || statusSession === 'inChat') {
                 qrCodeData = null;
-                // লগইন সফল হলে ডাটাবেসে ব্যাকআপ নিয়ে রাখবে
                 await backupSessionToMongo();
             }
         },
@@ -106,7 +99,6 @@ async function startSystem() {
     });
 }
 
-// স্ট্যাটাস এবং QR কোড পেজ
 app.get('/', (req, res) => {
     if (whatsappClient) {
         res.send('<h2 style="color:green; text-align:center; margin-top:50px;">✅ API সচল আছে এবং WhatsApp কানেক্টেড!</h2>');
@@ -123,13 +115,12 @@ app.get('/', (req, res) => {
     }
 });
 
-// মেসেজ পাঠানোর রাউট
 app.post('/send-message', async (req, res) => {
     try {
         const { phone, message } = req.body;
 
         if (!phone || !message) {
-            return res.status(400).json({ success: false, message: 'ফোন নম্বর এবং মেসেজ উভযই দিতে হবে!' });
+            return res.status(400).json({ success: false, message: 'ফোন নম্বর এবং মেসেজ উভয়ই দিতে হবে!' });
         }
 
         if (!whatsappClient) {
@@ -149,5 +140,5 @@ app.post('/send-message', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 সার্ভার চালু হয়েছে ${PORT} পোর্টে`);
-    startSystem(); // সার্ভার রান হওয়ার সাথে সাথে হোয়াটসঅ্যাপ সিস্টেম স্টার্ট হবে
+    startSystem();
 });
