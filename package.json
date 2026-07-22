@@ -1,15 +1,7 @@
-{
-  "name": "samity-whatsapp-api",
-  "version": "1.0.0",
-  "description": "WhatsApp API for Samity Management",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.35.0",
-    "adm-zip": "^0.5.16",
-    "express": "^4.19.2",
-    "mongodb": "^6.8.0"
-  }
+"dependencies": {
+  "@wppconnect-team/wppconnect": "^1.35.0",
+  "adm-zip": "^0.5.16",
+  "cors": "^2.8.5",
+  "express": "^4.19.2",
+  "mongodb": "^6.8.0"
 }
