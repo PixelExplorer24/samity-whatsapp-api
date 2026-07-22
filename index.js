@@ -1,183 +1,188 @@
 const express = require('express');
 const wppconnect = require('@wppconnect-team/wppconnect');
+const { MongoClient, GridFSBucket } = require('mongodb');
+const AdmZip = require('adm-zip');
+const fs = require('fs');
+
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 app.use(express.json());
 
+// --- MongoDB সেটআপ (Render এর Environment Variable থেকে পড়বে) ---
+const MONGO_URI = process.env.MONGO_URI; 
+if (!MONGO_URI) {
+    console.error("⚠️ MONGO_URI environment variable is missing!");
+}
+const mongoClient = new MongoClient(MONGO_URI);
+
 let waClient = null;
 let latestQRImage = null;
 
-// হোয়াটসঅ্যাপ ক্লায়েন্ট শুরু করার রুট
-wppconnect.create({
-    session: 'escs-session',
-    folderNameToken: 'tokens', // সেশন সেভ রাখার ফোল্ডার
-    autoClose: 0,
-    waitForLogin: true, 
-    catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
-        console.log('QR Code generated! Please scan.');
-        latestQRImage = base64Qr;
-    },
-    statusFind: (statusSession, session) => {
-        console.log('Status Session: ', statusSession);
-        if (statusSession === 'inChat' || statusSession === 'isLogged' || statusSession === 'successChat') {
-            latestQRImage = null;
-            console.log('WhatsApp session is securely connected!');
-        }
-    },
-    headless: true,
-    devtools: false,
-    useChrome: true,
-    debug: false,
-    logQR: false, // টার্মিনালে কোড প্রিন্ট হওয়া বন্ধ করা হলো
-    puppeteerOptions: {
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process', 
-            '--disable-gpu'
-        ]
-    }
-})
-.then((client) => {
-    waClient = client;
-    latestQRImage = null;
-    console.log('WhatsApp Client is Ready & Online!');
-})
-.catch((error) => console.log('WPPConnect Init Error:', error));
+// --- রিস্টোর ফাংশন (Render সার্ভার চালুর সময় MongoDB থেকে টোকেন আনবে) ---
+async function restoreSession() {
+    console.log('Checking for saved session in MongoDB...');
+    if (!MONGO_URI) return;
+    try {
+        await mongoClient.connect();
+        const db = mongoClient.db('whatsapp_session_db');
+        const bucket = new GridFSBucket(db, { bucketName: 'sessions' });
 
-// টেস্ট রুট
+        const files = await db.collection('sessions.files').find({ filename: 'whatsapp-session.zip' }).toArray();
+
+        if (files.length > 0) {
+            await new Promise((resolve, reject) => {
+                const downloadStream = bucket.openDownloadStreamByName('whatsapp-session.zip');
+                const writeStream = fs.createWriteStream('./whatsapp-session.zip');
+
+                downloadStream.pipe(writeStream);
+                writeStream.on('finish', () => {
+                    try {
+                        const zip = new AdmZip('./whatsapp-session.zip');
+                        zip.extractAllTo('./tokens', true);
+                        console.log('✅ Session restored successfully from MongoDB!');
+                        resolve();
+                    } catch (zipErr) {
+                        console.log('❌ Error unzipping:', zipErr.message);
+                        resolve(); 
+                    }
+                });
+                writeStream.on('error', reject);
+            });
+        } else {
+            console.log('⚠️ No previous session found. Ready for new QR scan.');
+        }
+    } catch (err) {
+        console.log('❌ Restore error:', err.message);
+    }
+}
+
+// --- ব্যাকআপ ফাংশন (লগইন সফল হলে MongoDB-তে সেভ করবে) ---
+async function backupSession() {
+    console.log('Backing up session to MongoDB...');
+    if (!MONGO_URI) return;
+    try {
+        await mongoClient.connect();
+        const db = mongoClient.db('whatsapp_session_db');
+        const bucket = new GridFSBucket(db, { bucketName: 'sessions' });
+
+        // টোকেন ফোল্ডারটিকে জিপ করা
+        const zip = new AdmZip();
+        zip.addLocalFolder('./tokens');
+        zip.writeZip('./whatsapp-session.zip');
+
+        // পুরোনো ব্যাকআপ ফাইল থাকলে মুছে ফেলা
+        const existingFiles = await db.collection('sessions.files').find({ filename: 'whatsapp-session.zip' }).toArray();
+        for (const file of existingFiles) {
+            await bucket.delete(file._id);
+        }
+
+        // নতুন জিপ ফাইল আপলোড করা
+        fs.createReadStream('./whatsapp-session.zip')
+            .pipe(bucket.openUploadStream('whatsapp-session.zip'))
+            .on('finish', () => {
+                console.log('✅ Session backed up safely to MongoDB!');
+            });
+    } catch (err) {
+        console.log('❌ Backup error:', err.message);
+    }
+}
+
+// --- হোয়াটসঅ্যাপ ক্লায়েন্ট শুরু করার ফাংশন ---
+function startWhatsApp() {
+    wppconnect.create({
+        session: 'escs-session',
+        folderNameToken: 'tokens',
+        autoClose: 0,
+        waitForLogin: true, 
+        catchQR: (base64Qr) => { 
+            latestQRImage = base64Qr; 
+            console.log('QR Code generated! Please scan from /qr route.');
+        },
+        statusFind: (statusSession) => {
+            console.log('Status Session: ', statusSession);
+            if (statusSession === 'isLogged' || statusSession === 'inChat') {
+                latestQRImage = null;
+                console.log('✅ WhatsApp Session is Connected!');
+                // লগইন সফল হওয়ার ৫ সেকেন্ড পর ব্যাকআপ নেবে (যাতে সব ফাইল ঠিকমতো তৈরি হতে পারে)
+                setTimeout(backupSession, 5000); 
+            }
+        },
+        headless: true,
+        devtools: false,
+        useChrome: true,
+        logQR: false, 
+        puppeteerOptions: {
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process', 
+                '--disable-gpu'
+            ]
+        }
+    })
+    .then((client) => { 
+        waClient = client; 
+        console.log('✅ WhatsApp Client is Ready & Online!');
+    })
+    .catch((err) => console.log('❌ WPPConnect Init Error:', err));
+}
+
+// --- রুট: টেস্ট এবং QR দেখা ---
 app.get('/', (req, res) => {
     res.send('Ekota Sanchay Co-operative Society (ESCS) WhatsApp API is Running!');
 });
 
-// কিউআর কোড এবং পেয়ারিং কোড ইন্টারফেস
 app.get('/qr', (req, res) => {
     if (latestQRImage) {
-        const html = `
-        <!DOCTYPE html>
-        <html lang="bn">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>WhatsApp Connect - ESCS</title>
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; margin-top: 40px; background-color: #f0f2f5; }
-                .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; max-width: 450px; width: 90%; }
-                h2 { color: #333; font-size: 18px; }
-                img { max-width: 100%; border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 20px; }
-                .pairing-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; }
-                input { width: 90%; padding: 12px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 5px; font-size: 16px; text-align: center; }
-                button { background-color: #25D366; color: white; border: none; padding: 12px 20px; font-size: 16px; font-weight: bold; border-radius: 5px; cursor: pointer; width: 100%; transition: 0.3s; }
-                button:hover { background-color: #128C7E; }
-                #code-display { font-size: 28px; font-weight: bold; letter-spacing: 5px; color: #075E54; margin-top: 20px; }
-                .note { color: #666; font-size: 13px; margin-bottom: 15px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h2>১. কিউআর কোড স্ক্যান করুন</h2>
-                <img src="${latestQRImage}" alt="QR Code">
-                
-                <div class="pairing-section">
-                    <h2>২. অথবা ৮-সংখ্যার কোড ব্যবহার করুন</h2>
-                    <p class="note">আপনার হোয়াটসঅ্যাপ নম্বরটি দিন (কান্ট্রি কোড সহ, যেমন: 88017XXXXXXXX)</p>
-                    <input type="text" id="phone" placeholder="88017XXXXXXXX" required>
-                    <button onclick="getCode()">কোড তৈরি করুন</button>
-                    <div id="code-display"></div>
-                </div>
-            </div>
-
-            <script>
-                async function getCode() {
-                    const phone = document.getElementById('phone').value.trim();
-                    const display = document.getElementById('code-display');
-                    
-                    if(!phone) { alert('দয়া করে ফোন নম্বর দিন!'); return; }
-                    display.innerText = 'অপেক্ষা করুন...';
-                    
-                    try {
-                        const response = await fetch('/get-pairing-code', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ phone: phone })
-                        });
-                        const data = await response.json();
-                        if(data.status === 'success') { display.innerText = data.code; } 
-                        else { display.innerText = 'এরর: ' + data.message; }
-                    } catch(err) { display.innerText = 'কোড আনতে সমস্যা হয়েছে!'; }
-                }
-            </script>
-        </body>
-        </html>
-        `;
-        res.send(html);
+        res.send(`<div style="text-align:center; margin-top:50px; font-family:Arial;"><h2>Scan QR Code</h2><img src="${latestQRImage}" style="border: 1px solid #ddd; padding: 10px; border-radius: 8px;"></div>`);
     } else {
-        res.send(`
-            <div style="font-family: Arial; text-align: center; margin-top: 50px;">
-                <h2 style="color: #25D366;">✅ WhatsApp Session is Active!</h2>
-                <p style="color: #555;">আপনার অ্যাকাউন্ট সফলভাবে কানেক্টেড আছে। মোবাইল অফলাইনে থাকলেও মেসেজ ডেলিভারি হবে।</p>
-            </div>
-        `);
+        res.send('<div style="text-align:center; margin-top:50px; font-family:Arial;"><h2 style="color:green;">✅ WhatsApp is Active and Ready!</h2><p>আপনার অ্যাকাউন্ট সফলভাবে কানেক্টেড আছে। মোবাইল অফলাইনে থাকলেও মেসেজ ডেলিভারি হবে।</p></div>');
     }
 });
 
-// ৮ সংখ্যার পেয়ারিং কোড তৈরি
-app.post('/get-pairing-code', async (req, res) => {
-    const { phone } = req.body;
-    if (!waClient) return res.status(500).json({ status: 'error', message: 'WhatsApp client is starting...' });
-
-    try {
-        const cleanPhone = phone.replace(/[^0-9]/g, ''); 
-        const code = await waClient.getAuthCode(cleanPhone);
-        res.json({ status: 'success', code: code });
-    } catch (error) {
-        res.status(500).json({ status: 'error', message: error.message });
-    }
-});
-
-// মেসেজ পাঠানোর নিরাপদ রুট (অটো-রিট্রাই ফিচার সহ)
+// --- রুট: মেসেজ পাঠানো (অটো রিট্রাই ফিচার সহ) ---
 app.post('/send-message', async (req, res) => {
     const { phone, message } = req.body;
-    
-    if (!waClient) {
-        return res.status(503).json({ status: 'error', message: 'API is currently offline or reconnecting.' });
-    }
+    if (!waClient) return res.status(503).json({ status: 'error', message: 'API is offline or starting...' });
 
     try {
         const formattedPhone = phone.includes('@c.us') ? phone : `${phone}@c.us`;
         
-        // রিট্রাই মেকানিজম: কোনো কারণে ফেইল হলে ৩ বার চেষ্টা করবে
         let success = false;
         let lastError = null;
 
+        // রিট্রাই মেকানিজম: কোনো কারণে ফেইল হলে ২ সেকেন্ড পর পর ৩ বার চেষ্টা করবে
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
                 await waClient.sendText(formattedPhone, message);
                 success = true;
-                break; // সফল হলে লুপ থেকে বেরিয়ে যাবে
+                break; 
             } catch (err) {
                 lastError = err;
                 console.log(`Attempt ${attempt} failed. Retrying...`);
-                await new Promise(resolve => setTimeout(resolve, 2000)); // ২ সেকেন্ড অপেক্ষা করে আবার চেষ্টা করবে
+                await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
 
         if (success) {
             res.json({ status: 'success', message: 'Message sent successfully!' });
         } else {
-            throw lastError; // ৩ বারই ফেইল করলে মেইন catch ব্লকে পাঠাবে
+            throw lastError; 
         }
 
     } catch (error) {
-        res.status(500).json({ status: 'error', message: 'Failed to send message after multiple attempts.', details: error.message });
+        res.status(500).json({ status: 'error', message: 'Failed to send message', details: error.message });
     }
 });
 
-app.listen(PORT, () => {
+// --- সার্ভার স্টার্ট ---
+app.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`);
+    await restoreSession(); // ১. আগে MongoDB থেকে টোকেন ফাইল নামাবে
+    startWhatsApp();        // ২. তারপর হোয়াটসঅ্যাপ সেশন চালু করবে
 });
