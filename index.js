@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const { MongoClient } = require('mongodb');
+const { exec } = require('child_process'); // ব্রাউজার ক্র্যাশ রোধ করতে প্রসেস ক্লিন করার জন্য
 
 const app = express();
 app.use(cors());
@@ -20,7 +21,7 @@ let whatsappClient = null;
 let qrCodeData = null;
 let pairingCodeStr = null;
 let clientStatus = 'Initializing...';
-let isSystemStarting = false; // ব্রাউজার ক্র্যাশ রোধ করার জন্য
+let isSystemStarting = false;
 
 // MongoDB থেকে আগের সেশন রিস্টোর করার ফাংশন
 async function restoreSessionFromMongo() {
@@ -39,10 +40,10 @@ async function restoreSessionFromMongo() {
             zip.extractAllTo(TOKEN_DIR, true);
             console.log('✅ MongoDB থেকে সেশন সফলভাবে রিস্টোর করা হয়েছে!');
             fs.unlinkSync(zipPath);
-            return true; // সেশন পাওয়া গেছে
+            return true; 
         } else {
             console.log('⚠️ ডাটাবেসে আগের কোনো সেশন পাওয়া যায়নি।');
-            return false; // সেশন পাওয়া যায়নি
+            return false; 
         }
     } catch (error) {
         console.error('❌ সেশন রিস্টোর করতে সমস্যা:', error.message);
@@ -78,16 +79,40 @@ async function backupSessionToMongo() {
     }
 }
 
+// ব্রাউজার ক্র্যাশ এড়াতে পূর্বের সেশন ক্লিন করার ফাংশন
+async function killBrowserAndReset() {
+    console.log('🛑 Switching mode: Clearing old browser instances...');
+    clientStatus = 'Switching mode...';
+    
+    if (whatsappClient) {
+        try { await whatsappClient.close(); } catch (e) {}
+        whatsappClient = null;
+    }
+
+    return new Promise((resolve) => {
+        isSystemStarting = false;
+        qrCodeData = null;
+        pairingCodeStr = null;
+        
+        try {
+            exec('pkill -f chrome', (err) => {
+                const lockFile = path.join(TOKEN_DIR, 'SingletonLock');
+                if (fs.existsSync(lockFile)) {
+                    try { fs.unlinkSync(lockFile); } catch (e) {}
+                }
+                resolve();
+            });
+        } catch (e) {
+            resolve();
+        }
+    });
+}
+
 // সিস্টেম চালু করার মূল ফাংশন
 async function startSystem(phoneNumber = null) {
-    if (isSystemStarting || whatsappClient) {
-        console.log('⚠️ সিস্টেম আগে থেকেই চালু হচ্ছে বা কানেক্টেড আছে।');
-        return;
-    }
+    if (isSystemStarting) return;
     
     isSystemStarting = true;
-    qrCodeData = null;
-    pairingCodeStr = null;
     clientStatus = 'Starting WhatsApp Client...';
 
     const options = {
@@ -106,7 +131,7 @@ async function startSystem(phoneNumber = null) {
         catchQR: (base64Qr, asciiQR) => {
             console.log('QR কোড তৈরি হয়েছে!');
             qrCodeData = base64Qr;
-            clientStatus = 'QR Code Ready. Please scan.';
+            clientStatus = 'QR Code Ready. Please scan or use pairing code.';
         },
         statusFind: async (statusSession) => {
             console.log('সেশন স্ট্যাটাস:', statusSession);
@@ -116,7 +141,7 @@ async function startSystem(phoneNumber = null) {
                 pairingCodeStr = null;
                 isSystemStarting = false;
                 clientStatus = 'Connected & Ready!';
-                await backupSessionToMongo(); // লগিন সফল হলে সেভ করবে, ফলে অফলাইনেও চলবে
+                await backupSessionToMongo(); 
             }
         },
         headless: true,
@@ -136,12 +161,12 @@ async function startSystem(phoneNumber = null) {
     .then((client) => {
         whatsappClient = client;
         isSystemStarting = false;
-        console.log('✅ WhatsApp API কানেক্টেড এবং মেসেজ পাঠানোর জন্য প্রস্তুত!');
-        clientStatus = 'Connected & Ready!';
+        if (clientStatus !== 'Connected & Ready!') {
+            clientStatus = 'Waiting for scan or pairing code...';
+        }
     })
     .catch((error) => {
-        console.log('❌ WhatsApp ক্লায়েন্ট চালু হতে সমস্যা:', error);
-        clientStatus = `Error: ${error.message}`;
+        console.log('❌ WhatsApp ক্লায়েন্ট চালু হতে সমস্যা বা মোড পরিবর্তন করা হয়েছে:', error.message);
         isSystemStarting = false;
     });
 }
@@ -156,70 +181,66 @@ app.get('/', (req, res) => {
                 <p>Status: <b>${clientStatus}</b></p>
             </div>
         `);
-    } else if (qrCodeData || pairingCodeStr) {
+    } else if (pairingCodeStr) {
+        // পেয়ারিং কোড দেখানোর স্ক্রিন
         res.send(`
             <div style="text-align: center; margin-top: 50px; font-family: sans-serif;">
-                <h2>হোয়াটসঅ্যাপ কানেক্ট করুন</h2>
+                <h2>ফোন নাম্বার দিয়ে লিংক করুন</h2>
+                <p style="color: #333;">আপনার হোয়াটসঅ্যাপের <b>Linked Devices -> Link with phone number</b> অপশনে যান এবং নিচের কোডটি দিন:</p>
+                <p style="font-size: 32px; font-weight: bold; color: #075E54; letter-spacing: 5px; background: #e5ddd5; display: inline-block; padding: 10px 20px; border-radius: 10px; margin-top: 10px;">${pairingCodeStr}</p>
                 
-                ${qrCodeData ? `
-                    <p>কিউআর কোড স্ক্যান করুন:</p>
-                    <img src="${qrCodeData}" alt="QR Code" style="border: 2px solid #ccc; border-radius: 10px; padding: 10px; width: 280px; height: 280px;" />
-                ` : ''}
-
-                ${pairingCodeStr ? `
-                    <p style="color: #333;">আপনার হোয়াটসঅ্যাপের <b>Linked Devices</b> অপশনে যান এবং নিচের কোডটি দিন:</p>
-                    <p style="font-size: 32px; font-weight: bold; color: #075E54; letter-spacing: 5px; background: #e5ddd5; display: inline-block; padding: 10px 20px; border-radius: 10px; margin-top: 10px;">${pairingCodeStr}</p>
-                ` : ''}
-                
-                <p style="color: #666; margin-top: 20px;">স্ট্যাটাস: <b>${clientStatus}</b></p>
-                <p style="color: #888; font-size: 14px;"><i>কানেক্ট হয়ে গেলে পেজটি নিজে থেকেই আপডেট হয়ে যাবে...</i></p>
-                <script>setTimeout(() => { window.location.reload(); }, 5000);</script>
-            </div>
-        `);
-    } else if (isSystemStarting) {
-        res.send(`
-            <div style="text-align: center; margin-top: 50px; font-family: sans-serif;">
-                <h2 style="color:orange;">⏳ হোয়াটসঅ্যাপ ক্লায়েন্ট চালু হচ্ছে...</h2>
-                <p>অনুগ্রহ করে অপেক্ষা করুন।</p>
-                <p>স্ট্যাটাস: <b>${clientStatus}</b></p>
-                <script>setTimeout(() => { window.location.reload(); }, 4000);</script>
-            </div>
-        `);
-    } else {
-        res.send(`
-            <div style="text-align: center; margin-top: 50px; font-family: sans-serif;">
-                <h2>লগিন মাধ্যম নির্বাচন করুন</h2>
-                <p style="color: #666; font-size: 14px; margin-bottom: 25px;">যেকোনো একটি পদ্ধতি নির্বাচন করুন (ব্রাউজার ক্র্যাশ এড়াতে)</p>
-                
-                <div style="margin-bottom: 30px;">
-                    <button onclick="startQR()" style="padding: 12px 25px; cursor: pointer; background: #25D366; color: white; border: none; border-radius: 5px; font-size: 16px; font-weight: bold;">QR Code স্ক্যান করুন</button>
+                <div style="margin-top: 30px;">
+                    <button onclick="startQR()" style="padding: 10px 20px; cursor: pointer; background: #666; color: white; border: none; border-radius: 5px;">কিউআর কোড স্ক্যান করতে ফিরে যান</button>
                 </div>
-
-                <div style="border-top: 1px solid #ddd; padding-top: 30px; max-width: 400px; margin: auto;">
-                    <h3 style="color: #333;">অথবা, ফোন নাম্বার দিয়ে লিংক করুন</h3>
-                    <p style="font-size: 14px; color: #666;">কান্ট্রি কোড সহ নাম্বার দিন (যেমন: 8801XXXXXXXXX)</p>
-                    <input type="text" id="phoneInput" placeholder="8801XXXXXXXXX" style="padding: 12px; width: 80%; border-radius: 5px; border: 1px solid #ccc; text-align: center; font-size: 16px; margin-bottom: 15px;">
-                    <br>
-                    <button onclick="requestPairingCode()" style="padding: 12px 25px; cursor: pointer; background: #128C7E; color: white; border: none; border-radius: 5px; font-size: 16px; font-weight: bold;">কোড জেনারেট করুন</button>
-                </div>
-
-                <p style="margin-top: 30px; color: #888;">স্ট্যাটাস: <b>Waiting for user input...</b></p>
                 
+                <p style="color: #888; margin-top: 20px;">স্ট্যাটাস: <b>${clientStatus}</b></p>
                 <script>
+                    setTimeout(() => { window.location.reload(); }, 5000);
                     function startQR() {
                         document.body.style.opacity = '0.5';
                         fetch('/start-qr', { method: 'POST' }).then(() => window.location.reload());
                     }
-                    
+                </script>
+            </div>
+        `);
+    } else {
+        // কিউআর কোড এবং ফোন ইনপুট স্ক্রিন
+        res.send(`
+            <div style="text-align: center; margin-top: 50px; font-family: sans-serif;">
+                <h2>১. হোয়াটসঅ্যাপ কানেক্ট করতে কিউআর কোড স্ক্যান করুন</h2>
+                
+                ${qrCodeData ? `
+                    <img src="${qrCodeData}" alt="QR Code" style="border: 2px solid #ccc; border-radius: 10px; padding: 10px; margin-top: 10px; width: 280px; height: 280px;" />
+                ` : `
+                    <p style="color:orange; margin: 50px 0;">⏳ সার্ভার চালু হচ্ছে এবং কিউআর কোড লোড হচ্ছে...</p>
+                `}
+
+                <div style="margin-top: 30px; border-top: 1px solid #ddd; padding-top: 30px; max-width: 400px; margin-left: auto; margin-right: auto;">
+                    <h3 style="color: #333;">অথবা, ফোন নাম্বার দিয়ে লিংক করুন</h3>
+                    <p style="font-size: 14px; color: #666;">কান্ট্রি কোড সহ নাম্বার দিন (যেমন: 8801XXXXXXXXX)</p>
+                    <input type="text" id="phoneInput" placeholder="8801XXXXXXXXX" style="padding: 12px; width: 80%; border-radius: 5px; border: 1px solid #ccc; text-align: center; font-size: 16px; margin-bottom: 15px;">
+                    <br>
+                    <button onclick="requestPairingCode()" style="padding: 12px 25px; cursor: pointer; background: #25D366; color: white; border: none; border-radius: 5px; font-size: 16px; font-weight: bold;">কোড জেনারেট করুন</button>
+                </div>
+
+                <p style="color: #666; margin-top: 20px;">স্ট্যাটাস: <b>${clientStatus}</b></p>
+                <p style="color: #888; font-size: 14px;"><i>কানেক্ট করা হয়ে গেলে পেজটি নিজে থেকেই আপডেট হয়ে যাবে...</i></p>
+                
+                <script>
+                    setTimeout(() => { window.location.reload(); }, 5000);
+
                     function requestPairingCode() {
                         const phone = document.getElementById('phoneInput').value;
-                        if (!phone) return alert('দয়া করে কান্ট্রি কোড সহ ফোন নাম্বার দিন!');
+                        if (!phone) return alert('দয়া করে ফোন নাম্বার দিন!');
+                        
                         document.body.style.opacity = '0.5';
                         fetch('/request-pairing-code', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({ phone })
-                        }).then(() => window.location.reload());
+                        }).then(() => {
+                            console.log("Requesting pairing code...");
+                        }).catch(console.error);
                     }
                 </script>
             </div>
@@ -227,19 +248,28 @@ app.get('/', (req, res) => {
     }
 });
 
-// রাউট: ম্যানুয়ালি QR কোড চালু করা
-app.post('/start-qr', (req, res) => {
+// রাউট: ম্যানুয়ালি QR কোড মোডে ফিরে যাওয়া
+app.post('/start-qr', async (req, res) => {
+    await killBrowserAndReset();
     startSystem();
     res.status(200).json({ success: true });
 });
 
 // রাউট: পেয়ারিং কোড রিকোয়েস্ট করা
-app.post('/request-pairing-code', (req, res) => {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ success: false, message: 'ফোন নাম্বার প্রয়োজন!' });
-    
-    startSystem(phone);
-    res.status(200).json({ success: true });
+app.post('/request-pairing-code', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ success: false, message: 'ফোন নাম্বার প্রয়োজন!' });
+        
+        // পূর্বের ব্রাউজার প্রসেস কিল করে নতুন করে ফোন নাম্বার দিয়ে চালু করা হচ্ছে
+        await killBrowserAndReset();
+        startSystem(phone);
+        
+        res.status(200).json({ success: true, message: 'পেয়ারিং কোড রিকোয়েস্ট পাঠানো হয়েছে।' });
+    } catch (error) {
+        console.error('পেয়ারিং কোড রিকোয়েস্ট করতে সমস্যা:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
 });
 
 // রাউট: মেসেজ পাঠানো
@@ -252,8 +282,10 @@ app.post('/send-message', async (req, res) => {
         if (!whatsappClient) {
             return res.status(500).json({ success: false, message: 'হোয়াটসঅ্যাপ এখনো কানেক্ট হয়নি!' });
         }
+        
         const formattedPhone = phone.includes('@c.us') ? phone : `${phone}@c.us`;
         await whatsappClient.sendText(formattedPhone, message);
+        
         res.status(200).json({ success: true, message: 'মেসেজ সফলভাবে পাঠানো হয়েছে!', recipient: phone });
     } catch (error) {
         console.error('মেসেজ পাঠাতে সমস্যা:', error);
@@ -267,12 +299,8 @@ app.listen(PORT, async () => {
     console.log(`🚀 সার্ভার চালু হয়েছে ${PORT} পোর্টে`);
     
     // প্রথমে ডাটাবেসে চেক করবে আগের কোনো লগিন সেশন আছে কিনা
-    const hasSession = await restoreSessionFromMongo();
-    if (hasSession) {
-        console.log('♻️ আগের সেশন পাওয়া গেছে, স্বয়ংক্রিয়ভাবে ক্লায়েন্ট চালু হচ্ছে...');
-        startSystem();
-    } else {
-        console.log('⏳ কোনো সেশন নেই, ব্রাউজার ক্র্যাশ এড়াতে ইউজার ইনপুটের জন্য অপেক্ষা করা হচ্ছে...');
-        clientStatus = 'Waiting for login method...';
-    }
+    await restoreSessionFromMongo();
+    
+    // সার্ভার চালু হওয়ার সাথে সাথেই অটোমেটিকভাবে সিস্টেম স্টার্ট হবে (QR Code জেনারেট করবে)
+    startSystem();
 });
