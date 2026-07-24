@@ -18,6 +18,7 @@ const TOKEN_DIR = path.join(__dirname, 'tokens', SESSION_NAME);
 
 let whatsappClient = null;
 let qrCodeData = null;
+let pairingCodeStr = null; // লিংকিং কোড সংরক্ষণের জন্য
 let clientStatus = 'Initializing...';
 
 async function restoreSessionFromMongo() {
@@ -71,10 +72,12 @@ async function backupSessionToMongo() {
     }
 }
 
-async function startSystem() {
-    await restoreSessionFromMongo();
+async function startSystem(phoneNumber = null) {
+    if (!phoneNumber) {
+        await restoreSessionFromMongo();
+    }
 
-    wppconnect.create({
+    const options = {
         session: SESSION_NAME,
         autoClose: 0,
         qrTimeout: 0,
@@ -90,20 +93,33 @@ async function startSystem() {
         catchQR: (base64Qr, asciiQR) => {
             console.log('QR কোড তৈরি হয়েছে! দয়া করে স্ক্যান করুন।');
             qrCodeData = base64Qr;
-            clientStatus = 'QR Code Received. Please scan.';
+            clientStatus = 'QR Code Received. Please scan or enter phone number.';
         },
         statusFind: async (statusSession) => {
             console.log('সেশন স্ট্যাটাস:', statusSession);
             clientStatus = `Session Status: ${statusSession}`;
             if (statusSession === 'isLogged' || statusSession === 'inChat') {
                 qrCodeData = null;
+                pairingCodeStr = null;
                 clientStatus = 'Connected & Ready!';
                 await backupSessionToMongo();
             }
         },
         headless: true,
         useChrome: false
-    })
+    };
+
+    // যদি ফোন নাম্বার প্রদান করা হয়, তবে লিংকিং কোড জেনারেট করার অপশন যুক্ত হবে
+    if (phoneNumber) {
+        options.phoneNumber = phoneNumber;
+        options.catchLinkCode = (str) => {
+            console.log('✅ Pairing Code তৈরি হয়েছে:', str);
+            pairingCodeStr = str;
+            clientStatus = `Pairing Code Generated`;
+        };
+    }
+
+    wppconnect.create(options)
     .then((client) => {
         whatsappClient = client;
         console.log('✅ WhatsApp API কানেক্টেড এবং মেসেজ পাঠানোর জন্য প্রস্তুত!');
@@ -128,10 +144,42 @@ app.get('/', (req, res) => {
             <div style="text-align: center; margin-top: 50px; font-family: sans-serif;">
                 <h2>১. হোয়াটসঅ্যাপ কানেক্ট করতে কিউআর কোড স্ক্যান করুন</h2>
                 <img src="${qrCodeData}" alt="QR Code" style="border: 2px solid #ccc; border-radius: 10px; padding: 10px; margin-top: 20px; width: 280px; height: 280px;" />
-                <p style="color: #666; margin-top: 15px;">স্ট্যাটাস: <b>${clientStatus}</b></p>
-                <p style="color: #888; font-size: 14px;"><i>স্ক্যান করা হয়ে গেলে পেজটি নিজে থেকেই আপডেট হয়ে যাবে...</i></p>
+                
+                <div style="margin-top: 30px; border-top: 1px solid #ddd; padding-top: 30px; max-width: 400px; margin-left: auto; margin-right: auto;">
+                    <h3 style="color: #333;">অথবা, ফোন নাম্বার দিয়ে লিংক করুন</h3>
+                    <p style="font-size: 14px; color: #666;">কান্ট্রি কোড সহ নাম্বার দিন (যেমন: 8801XXXXXXXXX)</p>
+                    <input type="text" id="phoneInput" placeholder="8801XXXXXXXXX" style="padding: 12px; width: 80%; border-radius: 5px; border: 1px solid #ccc; text-align: center; font-size: 16px; margin-bottom: 15px;">
+                    <br>
+                    <button onclick="requestPairingCode()" style="padding: 12px 25px; cursor: pointer; background: #25D366; color: white; border: none; border-radius: 5px; font-size: 16px; font-weight: bold;">কোড জেনারেট করুন</button>
+                    <p id="pairingCodeDisplay" style="font-size: 26px; font-weight: bold; color: #075E54; letter-spacing: 5px; margin-top: 20px;">${pairingCodeStr ? pairingCodeStr : ''}</p>
+                </div>
+
+                <p style="color: #666; margin-top: 20px;">স্ট্যাটাস: <b>${clientStatus}</b></p>
+                <p style="color: #888; font-size: 14px;"><i>স্ক্যান বা কোড লিংক করা হয়ে গেলে পেজটি নিজে থেকেই আপডেট হয়ে যাবে...</i></p>
+                
                 <script>
                     setTimeout(() => { window.location.reload(); }, 5000);
+
+                    function requestPairingCode() {
+                        const phone = document.getElementById('phoneInput').value;
+                        if (!phone) return alert('দয়া করে ফোন নাম্বার দিন!');
+                        
+                        document.getElementById('pairingCodeDisplay').innerText = "অপেক্ষা করুন...";
+                        document.getElementById('pairingCodeDisplay').style.letterSpacing = "normal";
+
+                        fetch('/request-pairing-code', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ phone })
+                        }).then(res => res.json()).then(data => {
+                            if(data.success) {
+                                // রিলোড নেওয়ার জন্য অপেক্ষা করবে, রিলোড হলে কোড দেখাবে
+                                console.log("Request sent successfully.");
+                            } else {
+                                alert('Error: ' + data.message);
+                            }
+                        }).catch(console.error);
+                    }
                 </script>
             </div>
         `);
@@ -148,6 +196,24 @@ app.get('/', (req, res) => {
     }
 });
 
+// ফোন নাম্বারের মাধ্যমে পেয়ারিং কোড রিকোয়েস্ট করার রাউট
+app.post('/request-pairing-code', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) {
+            return res.status(400).json({ success: false, message: 'ফোন নাম্বার প্রয়োজন!' });
+        }
+        
+        // নাম্বার পাওয়ার পর নতুন করে সেশন রিকোয়েস্ট করা হচ্ছে
+        startSystem(phone);
+        
+        res.status(200).json({ success: true, message: 'পেয়ারিং কোড রিকোয়েস্ট পাঠানো হয়েছে। পেজ রিলোড হচ্ছে...' });
+    } catch (error) {
+        console.error('পেয়ারিং কোড রিকোয়েস্ট করতে সমস্যা:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 app.post('/send-message', async (req, res) => {
     try {
         const { phone, message } = req.body;
@@ -157,7 +223,7 @@ app.post('/send-message', async (req, res) => {
         }
 
         if (!whatsappClient) {
-            return res.status(500).json({ success: false, message: 'হোয়াটসঅ্যাপ এখনো কানেক্ট হয়নি! লিংকে গিয়ে QR কোড স্ক্যান করুন।' });
+            return res.status(500).json({ success: false, message: 'হোয়াটসঅ্যাপ এখনো কানেক্ট হয়নি! লিংকে গিয়ে QR কোড স্ক্যান করুন বা ফোন দিয়ে লিংক করুন।' });
         }
 
         const formattedPhone = phone.includes('@c.us') ? phone : `${phone}@c.us`;
